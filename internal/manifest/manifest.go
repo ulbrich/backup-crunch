@@ -21,32 +21,43 @@ func Write(m model.Manifest, path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// PrintSummary writes a concise human-readable summary of the run to w.
-func PrintSummary(w io.Writer, m model.Manifest) {
+// PrintSummary writes a concise human-readable summary of the run to w and
+// returns the first write error encountered (if any).
+func PrintSummary(w io.Writer, m model.Manifest) error {
 	s := m.Summary
 	mode := "COPY"
 	if s.DryRun {
 		mode = "DRY-RUN (no files written)"
 	}
-	fmt.Fprintf(w, "backup-crunch %s — %s\n", m.Version, mode)
-	fmt.Fprintf(w, "  sources scanned : %d\n", s.SourcesScanned)
-	fmt.Fprintf(w, "  files scanned   : %d\n", s.FilesScanned)
-	fmt.Fprintf(w, "  distinct paths  : %d\n", s.PathsSeen)
-	fmt.Fprintf(w, "  recovered       : %d (of which flagged: %d)\n", s.Recovered, s.Flagged)
-	fmt.Fprintf(w, "  unrecoverable   : %d (only zero-length copies existed)\n", s.UnrecoverableEmpty)
-	fmt.Fprintf(w, "  skipped (non-regular): %d\n", s.SkippedNonRegular)
+	// ew accumulates the first write error; once set, subsequent Fprintf calls
+	// are effectively no-ops as far as the caller is concerned.
+	var ew error
+	p := func(format string, args ...any) {
+		if ew != nil {
+			return
+		}
+		_, ew = fmt.Fprintf(w, format, args...)
+	}
+
+	p("backup-crunch %s — %s\n", m.Version, mode)
+	p("  sources scanned : %d\n", s.SourcesScanned)
+	p("  files scanned   : %d\n", s.FilesScanned)
+	p("  distinct paths  : %d\n", s.PathsSeen)
+	p("  recovered       : %d (of which flagged: %d)\n", s.Recovered, s.Flagged)
+	p("  unrecoverable   : %d (only zero-length copies existed)\n", s.UnrecoverableEmpty)
+	p("  skipped (non-regular): %d\n", s.SkippedNonRegular)
 	if s.Excluded > 0 {
-		fmt.Fprintf(w, "  excluded        : %d (matched --exclude)\n", s.Excluded)
+		p("  excluded        : %d (matched --exclude)\n", s.Excluded)
 	}
 	if s.Unreadable > 0 || s.UnreadableDirs > 0 {
-		fmt.Fprintf(w, "  unreadable      : %d files, %d dirs (named but not readable — see manifest)\n", s.Unreadable, s.UnreadableDirs)
+		p("  unreadable      : %d files, %d dirs (named but not readable — see manifest)\n", s.Unreadable, s.UnreadableDirs)
 	}
-	fmt.Fprintf(w, "  bytes copied    : %d\n", s.BytesCopied)
+	p("  bytes copied    : %d\n", s.BytesCopied)
 
 	if len(m.Clusters) > 0 {
-		fmt.Fprintf(w, "\nSuspicious timestamp clusters (%d) — mtimes may have been clobbered:\n", len(m.Clusters))
+		p("\nSuspicious timestamp clusters (%d) — mtimes may have been clobbered:\n", len(m.Clusters))
 		for _, c := range m.Clusters {
-			fmt.Fprintf(w, "  source[%d] %s: %d files share mtime %s\n",
+			p("  source[%d] %s: %d files share mtime %s\n",
 				c.SourceIndex, c.SourceRoot, c.FileCount, c.ModTime.Format("2006-01-02T15:04:05Z"))
 		}
 	}
@@ -58,10 +69,11 @@ func PrintSummary(w io.Writer, m model.Manifest) {
 		}
 	}
 	if len(unrec) > 0 {
-		fmt.Fprintf(w, "\nUnrecoverable paths (%d):\n", len(unrec))
-		for _, p := range unrec {
-			fmt.Fprintf(w, "  %s\n", p)
+		p("\nUnrecoverable paths (%d):\n", len(unrec))
+		for _, path := range unrec {
+			p("  %s\n", path)
 		}
 	}
-	fmt.Fprintf(w, "\nOutput tree: %s\n", m.OutDir)
+	p("\nOutput tree: %s\n", m.OutDir)
+	return ew
 }

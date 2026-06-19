@@ -32,6 +32,11 @@ const (
 
 // File is one regular file found under a source root. Content is never held in
 // memory — only this metadata is.
+//
+// Note: this type is dual-purpose — it is both the internal working type and
+// part of the serialized manifest schema (it appears in DecisionRecord). The
+// JSON tags below therefore define wire format: changing a field name or tag is
+// a manifest-format change, not just an internal refactor.
 type File struct {
 	SourceIndex int       `json:"source_index"` // index into Config.Sources
 	SourceRoot  string    `json:"source_root"`

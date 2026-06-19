@@ -2,6 +2,7 @@ package copier
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestCopyFilePreservesBytesAndMtime(t *testing.T) {
 	mtime := time.Unix(1500000000, 0).UTC()
 
 	dst := filepath.Join(dir, "out", "nested", "dst.bin")
-	n, err := CopyFile(src, dst, mtime, false, "go")
+	n, err := CopyFile(context.Background(), src, dst, mtime, false, "go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +53,7 @@ func TestCopyFileDryRunWritesNothing(t *testing.T) {
 	}
 	out := filepath.Join(dir, "out")
 	dst := filepath.Join(out, "dst.txt")
-	n, err := CopyFile(src, dst, time.Now(), true, "go")
+	n, err := CopyFile(context.Background(), src, dst, time.Now(), true, "go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestCopyFileNoTempResidue(t *testing.T) {
 	}
 	destDir := filepath.Join(dir, "out")
 	dst := filepath.Join(destDir, "dst.txt")
-	if _, err := CopyFile(src, dst, time.Unix(1, 0), false, "go"); err != nil {
+	if _, err := CopyFile(context.Background(), src, dst, time.Unix(1, 0), false, "go"); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(destDir)
@@ -99,7 +100,7 @@ func TestCopyFileErrorLeavesNoResidue(t *testing.T) {
 	dir := t.TempDir()
 	destDir := filepath.Join(dir, "out")
 	dst := filepath.Join(destDir, "dst.txt")
-	_, err := CopyFile(filepath.Join(dir, "does-not-exist"), dst, time.Unix(1, 0), false, "go")
+	_, err := CopyFile(context.Background(), filepath.Join(dir, "does-not-exist"), dst, time.Unix(1, 0), false, "go")
 	if err == nil {
 		t.Fatal("expected error for missing source")
 	}
@@ -117,7 +118,7 @@ func TestCopyFilePreservesMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := filepath.Join(dir, "out", "dst.sh")
-	if _, err := CopyFile(src, dst, time.Unix(1, 0), false, "go"); err != nil {
+	if _, err := CopyFile(context.Background(), src, dst, time.Unix(1, 0), false, "go"); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(dst)
@@ -142,7 +143,7 @@ func TestCopyFileCpBackend(t *testing.T) {
 	}
 	dst := filepath.Join(dir, "out", "dst.txt")
 	mtime := time.Unix(1500000000, 0).UTC()
-	if _, err := CopyFile(src, dst, mtime, false, "cp"); err != nil {
+	if _, err := CopyFile(context.Background(), src, dst, mtime, false, "cp"); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustReadFile(t, dst); got != "via cp backend" {
@@ -161,6 +162,45 @@ func TestCopyFileCpBackend(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".bc-tmp-") {
 			t.Errorf("cp backend left temp residue: %s", e.Name())
 		}
+	}
+}
+
+// A cancelled context must abort the copy and leave no dst or temp residue.
+func TestCopyFileContextCancelled(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.txt")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	destDir := filepath.Join(dir, "out")
+	dst := filepath.Join(destDir, "dst.txt")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := CopyFile(ctx, src, dst, time.Unix(1, 0), false, "go"); err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("dst should not exist after cancelled copy")
+	}
+	// The destination directory must not exist or, if created, hold no residue.
+	if entries, err := os.ReadDir(destDir); err == nil {
+		for _, e := range entries {
+			t.Errorf("cancelled copy left residue: %s", e.Name())
+		}
+	}
+}
+
+// streamCopy must honor context cancellation between chunks.
+func TestStreamCopyContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// A reader larger than one buffer; the loop checks ctx before the first read.
+	in := bytes.NewReader(bytes.Repeat([]byte("x"), 4<<20))
+	var dst bytes.Buffer
+	if err := streamCopy(ctx, &dst, in); err == nil {
+		t.Fatal("expected streamCopy to return a context error")
 	}
 }
 

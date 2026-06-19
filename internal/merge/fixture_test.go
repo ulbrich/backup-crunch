@@ -1,6 +1,7 @@
 package merge
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -42,7 +43,7 @@ func TestMergeTestBackupFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(c, nil); err != nil {
+	if _, err := Run(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
 

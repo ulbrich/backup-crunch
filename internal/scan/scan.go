@@ -3,13 +3,16 @@
 package scan
 
 import (
+	"context"
 	"io/fs"
+	"log/slog"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/text/unicode/norm"
 
+	"github.com/janulbrich/backup-crunch/internal/logging"
 	"github.com/janulbrich/backup-crunch/internal/model"
 )
 
@@ -62,18 +65,24 @@ func isExcluded(relSlash string, patterns []string) bool {
 // vanishing. A directory that cannot be entered is counted and its path
 // recorded, but its contents cannot be enumerated.
 //
-// Per-entry diagnostics are logged only when verbose; counts are always kept.
-func ScanSource(index int, root string, excludes []string, stats *Stats, verbose bool, logf func(string, ...any)) ([]model.File, error) {
+// Per-entry diagnostics are emitted at Debug level (shown only when the logger
+// is verbose); counts are always kept. logger may be nil. The walk is aborted
+// if ctx is cancelled.
+func ScanSource(ctx context.Context, index int, root string, excludes []string, stats *Stats, logger *slog.Logger) ([]model.File, error) {
+	if logger == nil {
+		logger = logging.Discard()
+	}
 	var files []model.File
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			// The entry could not be accessed.
 			if d != nil && !d.IsDir() {
 				files = append(files, unreadableFile(index, root, p))
 				stats.Unreadable++
-				if verbose && logf != nil {
-					logf("scan: unreadable file %q: %v", p, walkErr)
-				}
+				logger.Debug("scan: unreadable file", "path", p, "err", walkErr)
 				return nil
 			}
 			// A directory (or unknown) we cannot enter — its contents are lost.
@@ -81,9 +90,7 @@ func ScanSource(index int, root string, excludes []string, stats *Stats, verbose
 			if rel, rerr := filepath.Rel(root, p); rerr == nil {
 				stats.UnreadableDirList = append(stats.UnreadableDirList, filepath.ToSlash(rel))
 			}
-			if verbose && logf != nil {
-				logf("scan: unreadable dir %q: %v", p, walkErr)
-			}
+			logger.Debug("scan: unreadable dir", "path", p, "err", walkErr)
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
@@ -92,7 +99,12 @@ func ScanSource(index int, root string, excludes []string, stats *Stats, verbose
 
 		rel, rerr := filepath.Rel(root, p)
 		if rerr != nil {
+			// Cannot compute a relative path — record a phantom candidate (using
+			// the absolute path as a fallback) so the entry still surfaces in the
+			// manifest rather than vanishing silently.
+			files = append(files, unreadableFile(index, root, p))
 			stats.Unreadable++
+			logger.Debug("scan: unreadable file", "path", p, "err", rerr)
 			return nil
 		}
 		relSlash := filepath.ToSlash(rel)
@@ -100,9 +112,7 @@ func ScanSource(index int, root string, excludes []string, stats *Stats, verbose
 		if d.IsDir() {
 			if relSlash != "." && isExcluded(relSlash, excludes) {
 				stats.Excluded++
-				if verbose && logf != nil {
-					logf("scan: excluded dir %q", relSlash)
-				}
+				logger.Debug("scan: excluded dir", "path", relSlash)
 				return fs.SkipDir
 			}
 			return nil
@@ -110,9 +120,7 @@ func ScanSource(index int, root string, excludes []string, stats *Stats, verbose
 
 		if isExcluded(relSlash, excludes) {
 			stats.Excluded++
-			if verbose && logf != nil {
-				logf("scan: excluded %q", relSlash)
-			}
+			logger.Debug("scan: excluded", "path", relSlash)
 			return nil
 		}
 
@@ -121,9 +129,7 @@ func ScanSource(index int, root string, excludes []string, stats *Stats, verbose
 		// source root via a symlink.
 		if !d.Type().IsRegular() {
 			stats.SkippedNonRegular++
-			if verbose && logf != nil {
-				logf("scan: skip non-regular %q", relSlash)
-			}
+			logger.Debug("scan: skip non-regular", "path", relSlash)
 			return nil
 		}
 
@@ -132,9 +138,7 @@ func ScanSource(index int, root string, excludes []string, stats *Stats, verbose
 			// Named but not stat'able — record as an unreadable candidate.
 			files = append(files, unreadableFile(index, root, p))
 			stats.Unreadable++
-			if verbose && logf != nil {
-				logf("scan: unreadable file %q: %v", p, ierr)
-			}
+			logger.Debug("scan: unreadable file", "path", p, "err", ierr)
 			return nil
 		}
 

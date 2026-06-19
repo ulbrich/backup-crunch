@@ -1,6 +1,8 @@
 package scan
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,7 +38,7 @@ func TestScanSourceCounts(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "empty.txt"), "") // zero-length
 
 	stats := Stats{}
-	files, err := ScanSource(0, root, nil, &stats, false, nil)
+	files, err := ScanSource(context.Background(), 0, root, nil, &stats, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +69,7 @@ func TestScanSourceSkipsSymlink(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 	stats := Stats{}
-	files, err := ScanSource(0, root, nil, &stats, false, nil)
+	files, err := ScanSource(context.Background(), 0, root, nil, &stats, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +92,7 @@ func TestScanSourceExclude(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "$RECYCLE.BIN", "S-1-5", "$RABCDEF"), "deleted-data")
 
 	stats := Stats{}
-	files, err := ScanSource(0, root, []string{"*.tmp", "$RECYCLE.BIN"}, &stats, false, nil)
+	files, err := ScanSource(context.Background(), 0, root, []string{"*.tmp", "$RECYCLE.BIN"}, &stats, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +119,7 @@ func TestScanSourceUnreadableDir(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) }) // so TempDir cleanup works
 
 	stats := Stats{}
-	files, err := ScanSource(0, root, nil, &stats, false, nil)
+	files, err := ScanSource(context.Background(), 0, root, nil, &stats, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +136,24 @@ func TestScanSourceUnreadableDir(t *testing.T) {
 	}
 	if len(stats.UnreadableDirList) == 0 {
 		t.Errorf("UnreadableDirList should record the locked subtree")
+	}
+}
+
+func TestScanSourceContextCancelled(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "a.txt"), "hello")
+	mustWrite(t, filepath.Join(root, "sub", "b.txt"), "world")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stats := Stats{}
+	_, err := ScanSource(ctx, 0, root, nil, &stats, nil)
+	if err == nil {
+		t.Fatal("expected scan to abort on cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want context.Canceled", err)
 	}
 }
 

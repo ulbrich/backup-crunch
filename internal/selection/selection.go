@@ -48,7 +48,9 @@ func Select(group model.CandidateGroup, withHash bool) model.DecisionRecord {
 	}
 
 	// Total order: newest mtime, then largest size, then lowest source index.
-	sort.SliceStable(nonEmpty, func(i, j int) bool {
+	// The final source-index tiebreak makes this a strict total order, so a
+	// plain (non-stable) sort is already deterministic.
+	sort.Slice(nonEmpty, func(i, j int) bool {
 		a, b := nonEmpty[i], nonEmpty[j]
 		if !a.ModTime.Equal(b.ModTime) {
 			return a.ModTime.After(b.ModTime)

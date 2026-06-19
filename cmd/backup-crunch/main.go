@@ -3,14 +3,20 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"log"
 	"os"
+	"os/signal"
 
 	"github.com/janulbrich/backup-crunch/internal/cli"
+	"github.com/janulbrich/backup-crunch/internal/logging"
 	"github.com/janulbrich/backup-crunch/internal/manifest"
 	"github.com/janulbrich/backup-crunch/internal/merge"
 )
+
+// version is the build version stamped into the manifest. Override at build
+// time with: -ldflags "-X main.version=v1.2.3".
+var version = "0.1.0"
 
 func main() {
 	c, err := cli.Parse(os.Args[1:])
@@ -21,17 +27,23 @@ func main() {
 		os.Exit(2)
 	}
 
-	log.SetFlags(0)
-	log.SetPrefix("backup-crunch: ")
-	// Genuine warnings (e.g. hash failures) always log; high-volume per-entry
-	// scan detail is gated behind --verbose inside the scanner.
-	logf := log.Printf
+	// Cancel the run cleanly on Ctrl-C / SIGTERM so deferred temp-file cleanup
+	// runs instead of leaving partial artifacts in --out.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
-	m, err := merge.Run(c, logf)
+	// Per-entry detail is gated behind --verbose (Debug level); genuine
+	// warnings (e.g. hash failures) are logged at Warn and always shown.
+	logger := logging.New(os.Stderr, c.Verbose)
+
+	m, err := merge.Run(ctx, c, merge.WithLogger(logger), merge.WithVersion(version))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	manifest.PrintSummary(os.Stdout, m)
+	if err := manifest.PrintSummary(os.Stdout, m); err != nil {
+		fmt.Fprintln(os.Stderr, "error: writing summary:", err)
+		os.Exit(1)
+	}
 	fmt.Fprintf(os.Stdout, "Manifest: %s\n", c.ManifestPath)
 }

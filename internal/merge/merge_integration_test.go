@@ -1,6 +1,7 @@
 package merge
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -134,7 +135,7 @@ func TestMergeEndToEnd(t *testing.T) {
 	}
 	_ = threshold
 
-	m, err := Run(c, nil)
+	m, err := Run(context.Background(), c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +225,7 @@ func TestMergeDryRunWritesNoFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := Run(c, nil)
+	m, err := Run(context.Background(), c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +254,7 @@ func TestMergeDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		m, err := Run(c, nil)
+		m, err := Run(context.Background(), c)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -274,7 +275,7 @@ func TestMergeDryRunDefaultManifestOnlyManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(c, nil); err != nil {
+	if _, err := Run(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
 	err = filepath.Walk(out, func(p string, info os.FileInfo, err error) error {
@@ -305,7 +306,7 @@ func TestMergeWorkersMatchSequential(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Run(c, nil); err != nil {
+		if _, err := Run(context.Background(), c); err != nil {
 			t.Fatal(err)
 		}
 		files := map[string]string{}
@@ -341,7 +342,7 @@ func TestMergeExclude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := Run(c, nil)
+	m, err := Run(context.Background(), c)
 	if err != nil {
 		t.Fatal(err)
 	}

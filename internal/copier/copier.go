@@ -6,19 +6,25 @@
 package copier
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
-)
 
-const bufSize = 1 << 20 // 1 MiB streaming buffer; content is never fully buffered.
+	"github.com/janulbrich/backup-crunch/internal/iobuf"
+)
 
 // CopyFile copies src to dst, preserving src's permission bits and modification
 // time. It returns the number of bytes that were (or in dry-run, would be)
 // copied.
+//
+// ctx cancels the copy: the pure-Go backend checks it between chunks (so a
+// large file aborts promptly), and the cp/rsync backends run as child
+// processes that are killed when ctx is done. A cancelled copy leaves no temp
+// residue.
 //
 // tool selects the backend: "go" (default, pure-Go streamed copy), "cp", or
 // "rsync". The cp/rsync backends are best-effort escape hatches; "go" is the
@@ -33,7 +39,10 @@ const bufSize = 1 << 20 // 1 MiB streaming buffer; content is never fully buffer
 // different filesystem would make rename fail with EXDEV or fall back to a
 // non-atomic copy. On any error the temp file is removed, so no partial
 // .bc-tmp-* artifacts are left in --out.
-func CopyFile(src, dst string, mtime time.Time, dryRun bool, tool string) (int64, error) {
+func CopyFile(ctx context.Context, src, dst string, mtime time.Time, dryRun bool, tool string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return 0, err
@@ -69,8 +78,7 @@ func CopyFile(src, dst string, mtime time.Time, dryRun bool, tool string) (int64
 
 	switch tool {
 	case "", "go":
-		buf := make([]byte, bufSize)
-		if _, err := io.CopyBuffer(tmp, in, buf); err != nil {
+		if err := streamCopy(ctx, tmp, in); err != nil {
 			tmp.Close()
 			return 0, err
 		}
@@ -84,7 +92,7 @@ func CopyFile(src, dst string, mtime time.Time, dryRun bool, tool string) (int64
 	case "cp", "rsync":
 		// The external tool writes the temp file; release our handle first.
 		tmp.Close()
-		if err := runCopyTool(tool, src, tmpName); err != nil {
+		if err := runCopyTool(ctx, tool, src, tmpName); err != nil {
 			return 0, err
 		}
 	default:
@@ -115,16 +123,40 @@ func CopyFile(src, dst string, mtime time.Time, dryRun bool, tool string) (int64
 	return size, nil
 }
 
+// streamCopy copies all of in into dst in fixed-size chunks, checking ctx
+// between chunks so a large copy aborts promptly on cancellation.
+func streamCopy(ctx context.Context, dst io.Writer, in io.Reader) error {
+	buf := make([]byte, iobuf.Size)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		nr, rerr := in.Read(buf)
+		if nr > 0 {
+			if _, werr := dst.Write(buf[:nr]); werr != nil {
+				return werr
+			}
+		}
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+}
+
 // runCopyTool invokes cp or rsync to copy src onto the (already existing) temp
-// file tmp. Arguments are passed directly to exec.Command (no shell), so source
-// paths cannot inject options or commands. "--" ends option parsing.
-func runCopyTool(tool, src, tmp string) error {
+// file tmp. Arguments are passed directly to exec.CommandContext (no shell), so
+// source paths cannot inject options or commands and the child is killed if ctx
+// is cancelled. "--" ends option parsing.
+func runCopyTool(ctx context.Context, tool, src, tmp string) error {
 	var cmd *exec.Cmd
 	switch tool {
 	case "cp":
-		cmd = exec.Command("cp", "-pf", "--", src, tmp) // -p preserves mode/times
+		cmd = exec.CommandContext(ctx, "cp", "-pf", "--", src, tmp) // -p preserves mode/times
 	case "rsync":
-		cmd = exec.Command("rsync", "-a", "--", src, tmp) // -a archive: perms+times
+		cmd = exec.CommandContext(ctx, "rsync", "-a", "--", src, tmp) // -a archive: perms+times
 	default:
 		return fmt.Errorf("unknown copy tool %q", tool)
 	}

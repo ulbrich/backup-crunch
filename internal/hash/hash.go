@@ -7,9 +7,9 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
-)
 
-const bufSize = 1 << 20 // 1 MiB; content is streamed, never fully buffered.
+	"github.com/janulbrich/backup-crunch/internal/iobuf"
+)
 
 // SHA256Stream returns the hex-encoded SHA-256 of the file at path, reading it
 // in fixed-size chunks so memory stays constant regardless of file size.
@@ -21,7 +21,7 @@ func SHA256Stream(path string) (string, error) {
 	defer f.Close()
 
 	h := sha256.New()
-	buf := make([]byte, bufSize)
+	buf := make([]byte, iobuf.Size)
 	if _, err := io.CopyBuffer(h, f, buf); err != nil {
 		return "", err
 	}

@@ -51,7 +51,9 @@ func TestWriteRoundTrip(t *testing.T) {
 
 func TestPrintSummary(t *testing.T) {
 	var buf bytes.Buffer
-	PrintSummary(&buf, sampleManifest())
+	if err := PrintSummary(&buf, sampleManifest()); err != nil {
+		t.Fatalf("PrintSummary error: %v", err)
+	}
 	if buf.Len() == 0 {
 		t.Error("expected non-empty summary output")
 	}
