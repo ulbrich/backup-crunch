@@ -1,0 +1,10 @@
+# build artifacts
+/bin/
+
+# local build cache / temp (sandbox-writable locations used during development)
+/.gocache/
+/.gotmp/
+/.smoke/
+
+.omc
+tmp
