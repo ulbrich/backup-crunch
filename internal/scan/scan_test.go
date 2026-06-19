@@ -157,6 +157,50 @@ func TestScanSourceContextCancelled(t *testing.T) {
 	}
 }
 
+// TestScanSourceEmptyDirs verifies that directories holding no entries are
+// reported (so the merge can recreate them), while directories that contain a
+// file, a subdirectory, or that are excluded are not.
+func TestScanSourceEmptyDirs(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "files", "a.txt"), "x") // "files" is not empty
+	if err := os.MkdirAll(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "branch", "leaf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An excluded empty directory must not be reported.
+	if err := os.MkdirAll(filepath.Join(root, "skip"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stats := Stats{}
+	if _, err := ScanSource(context.Background(), 0, root, []string{"skip"}, &stats, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for _, e := range stats.EmptyDirs {
+		got = append(got, e.RelPath)
+	}
+	for _, want := range []string{"empty", "branch/leaf"} {
+		if !contains(got, want) {
+			t.Errorf("EmptyDirs %v missing %q", got, want)
+		}
+	}
+	for _, notWant := range []string{".", "files", "branch", "skip"} {
+		if contains(got, notWant) {
+			t.Errorf("EmptyDirs %v should not contain %q", got, notWant)
+		}
+	}
+	// The reported empty dirs must carry a non-zero source mtime to restore.
+	for _, e := range stats.EmptyDirs {
+		if e.ModTime.IsZero() {
+			t.Errorf("empty dir %q has zero mtime", e.RelPath)
+		}
+	}
+}
+
 func contains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {

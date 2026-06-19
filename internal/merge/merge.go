@@ -1,6 +1,7 @@
 // Package merge orchestrates a full run: scan sources, group by fold key,
 // detect timestamp clusters, optionally hash tied candidates, select winners,
-// copy them into the output tree, and assemble the manifest.
+// copy them into the output tree, recreate empty source directories, restore
+// directory modification times, and assemble the manifest.
 package merge
 
 import (
@@ -128,6 +129,21 @@ func Run(ctx context.Context, c *cli.Config, opts ...Option) (model.Manifest, er
 	}
 	summary.SuspiciousClusters = len(clusters)
 
+	// 8. Recreate empty source directories and restore directory mtimes so the
+	// output mirrors the source's structure and timestamps. This must run after
+	// the file copies, which create directories and bump their mtimes to "now".
+	emptyDirs := planEmptyDirs(records, stats.EmptyDirs)
+	summary.EmptyDirs = len(emptyDirs)
+	var dirErr error
+	if !c.DryRun && ctx.Err() == nil {
+		dirErr = createEmptyDirs(ctx, c.Out, emptyDirs)
+		if dirErr == nil {
+			// Best-effort: a failed dir-time restore is logged, not fatal.
+			restoreDirTimes(c.Out, dirTimes(records, emptyDirs), o.logger)
+		}
+	}
+	runErr := errors.Join(copyErr, dirErr)
+
 	m := model.Manifest{
 		Tool:           "backup-crunch",
 		Version:        o.version,
@@ -138,20 +154,21 @@ func Run(ctx context.Context, c *cli.Config, opts ...Option) (model.Manifest, er
 		Records:        records,
 		Clusters:       clusters,
 		UnreadableDirs: stats.UnreadableDirList,
+		EmptyDirs:      emptyDirRelPaths(emptyDirs),
 	}
-	if copyErr != nil {
-		m.RunError = copyErr.Error()
+	if runErr != nil {
+		m.RunError = runErr.Error()
 	}
 
 	// The manifest is always written — even in dry-run and even when copying
 	// failed — so the decisions and any partial progress are preserved.
 	if err := os.MkdirAll(filepath.Dir(c.ManifestPath), 0o755); err != nil {
-		return m, errors.Join(copyErr, fmt.Errorf("create manifest dir: %w", err))
+		return m, errors.Join(runErr, fmt.Errorf("create manifest dir: %w", err))
 	}
 	if err := manifest.Write(m, c.ManifestPath); err != nil {
-		return m, errors.Join(copyErr, fmt.Errorf("write manifest: %w", err))
+		return m, errors.Join(runErr, fmt.Errorf("write manifest: %w", err))
 	}
-	return m, copyErr
+	return m, runErr
 }
 
 // scanAll walks every source (read-only) and returns the combined files plus

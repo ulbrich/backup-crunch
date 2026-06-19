@@ -9,12 +9,22 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/janulbrich/backup-crunch/internal/logging"
 	"github.com/janulbrich/backup-crunch/internal/model"
 )
+
+// EmptyDir is a source directory that held no entries. It is captured during
+// the scan so the merge can recreate it in the output tree (it would otherwise
+// be lost, since only files become candidates) and restore its modification
+// time.
+type EmptyDir struct {
+	RelPath string    // slash relative path within the source
+	ModTime time.Time // the source directory's own mtime (UTC)
+}
 
 // Stats accumulates per-run scan counters.
 type Stats struct {
@@ -23,7 +33,8 @@ type Stats struct {
 	Excluded          int      // entries matching an exclude pattern
 	Unreadable        int      // regular files named but not stat'able/openable
 	UnreadableDirs    int      // directories that could not be entered
-	UnreadableDirList []string // the subtree roots we could not enter
+	UnreadableDirList []string   // the subtree roots we could not enter
+	EmptyDirs         []EmptyDir // directories that held no entries
 }
 
 // FoldKey normalizes a relative path into a case- and Unicode-normalized
@@ -63,7 +74,10 @@ func isExcluded(relSlash string, patterns []string) bool {
 // dataless cloud placeholder) is recorded as an Unreadable candidate so a path
 // whose only copies are unreadable still surfaces in the manifest rather than
 // vanishing. A directory that cannot be entered is counted and its path
-// recorded, but its contents cannot be enumerated.
+// recorded, but its contents cannot be enumerated. Directories that hold no
+// entries at all are collected in stats.EmptyDirs so the merge can recreate
+// them in the output (they would otherwise vanish, as only files yield
+// candidates).
 //
 // Per-entry diagnostics are emitted at Debug level (shown only when the logger
 // is verbose); counts are always kept. logger may be nil. The walk is aborted
@@ -73,12 +87,27 @@ func ScanSource(ctx context.Context, index int, root string, excludes []string, 
 		logger = logging.Discard()
 	}
 	var files []model.File
+	// Empty-directory tracking: a directory is "empty" if no entry names it as a
+	// parent. dirCands holds every readable, non-excluded directory; hasChild
+	// records which directories had at least one entry beneath them. The set
+	// difference (computed after the walk) is the empty directories.
+	var dirCands []EmptyDir
+	hasChild := map[string]bool{}
+	noteChild := func(relSlash string) {
+		if relSlash != "." {
+			hasChild[path.Dir(relSlash)] = true
+		}
+	}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if walkErr != nil {
-			// The entry could not be accessed.
+			// The entry could not be accessed, but it physically exists, so its
+			// parent is not empty.
+			if rel, rerr := filepath.Rel(root, p); rerr == nil {
+				noteChild(filepath.ToSlash(rel))
+			}
 			if d != nil && !d.IsDir() {
 				files = append(files, unreadableFile(index, root, p))
 				stats.Unreadable++
@@ -108,12 +137,25 @@ func ScanSource(ctx context.Context, index int, root string, excludes []string, 
 			return nil
 		}
 		relSlash := filepath.ToSlash(rel)
+		// Every entry that exists makes its parent non-empty.
+		noteChild(relSlash)
 
 		if d.IsDir() {
 			if relSlash != "." && isExcluded(relSlash, excludes) {
 				stats.Excluded++
 				logger.Debug("scan: excluded dir", "path", relSlash)
 				return fs.SkipDir
+			}
+			// Record as a candidate empty directory; the post-walk pass keeps only
+			// those that never had a child. The root (".") is not a candidate — it
+			// always exists in the output. A failed Info leaves a zero mtime, which
+			// the merge treats as "no source time to restore".
+			if relSlash != "." {
+				var mt time.Time
+				if di, ierr := d.Info(); ierr == nil {
+					mt = di.ModTime().UTC()
+				}
+				dirCands = append(dirCands, EmptyDir{RelPath: relSlash, ModTime: mt})
 			}
 			return nil
 		}
@@ -155,6 +197,15 @@ func ScanSource(ctx context.Context, index int, root string, excludes []string, 
 		stats.FilesScanned++
 		return nil
 	})
+
+	// A directory with no child entry is empty and would be lost in the merge
+	// (only files become candidates), so record it for recreation in the output.
+	for _, dc := range dirCands {
+		if !hasChild[dc.RelPath] {
+			stats.EmptyDirs = append(stats.EmptyDirs, dc)
+			logger.Debug("scan: empty dir", "path", dc.RelPath)
+		}
+	}
 	return files, err
 }
 

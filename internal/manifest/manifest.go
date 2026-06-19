@@ -53,6 +53,13 @@ func PrintSummary(w io.Writer, m model.Manifest) error {
 		p("  unreadable      : %d files, %d dirs (named but not readable — see manifest)\n", s.Unreadable, s.UnreadableDirs)
 	}
 	p("  bytes copied    : %d\n", s.BytesCopied)
+	if s.EmptyDirs > 0 {
+		verb := "recreated"
+		if s.DryRun {
+			verb = "would recreate"
+		}
+		p("  empty dirs      : %d (%s)\n", s.EmptyDirs, verb)
+	}
 
 	if len(m.Clusters) > 0 {
 		p("\nSuspicious timestamp clusters (%d) — mtimes may have been clobbered:\n", len(m.Clusters))

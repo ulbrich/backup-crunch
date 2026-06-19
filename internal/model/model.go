@@ -90,6 +90,7 @@ type Summary struct {
 	Unreadable         int   `json:"unreadable"`      // files named but not stat'able/openable
 	UnreadableDirs     int   `json:"unreadable_dirs"` // subtrees that could not be entered
 	BytesCopied        int64 `json:"bytes_copied"`    // 0 in dry-run
+	EmptyDirs          int   `json:"empty_dirs"`      // empty source dirs recreated (would-be in dry-run)
 	DryRun             bool  `json:"dry_run"`
 }
 
@@ -111,4 +112,8 @@ type Manifest struct {
 	// UnreadableDirs lists subtree roots that could not be entered (e.g. dataless
 	// cloud placeholders). Their contents could not be enumerated or audited.
 	UnreadableDirs []string `json:"unreadable_dirs,omitempty"`
+	// EmptyDirs lists relative paths of source directories that held no files and
+	// would otherwise be lost in the merge. They are recreated empty in the output
+	// tree (skipped in dry-run) so the recovered structure matches the source.
+	EmptyDirs []string `json:"empty_dirs,omitempty"`
 }

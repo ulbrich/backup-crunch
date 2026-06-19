@@ -1,5 +1,5 @@
 // Package copier performs streamed, atomic file copies that preserve the
-// source's mode and modification time.
+// source's mode, modification time, and — on Windows — creation time.
 //
 // The package is named "copier" rather than "copy" to avoid shadowing Go's
 // builtin copy.
@@ -17,9 +17,9 @@ import (
 	"github.com/janulbrich/backup-crunch/internal/iobuf"
 )
 
-// CopyFile copies src to dst, preserving src's permission bits and modification
-// time. It returns the number of bytes that were (or in dry-run, would be)
-// copied.
+// CopyFile copies src to dst, preserving src's permission bits, modification
+// time, and (on Windows) creation time. It returns the number of bytes that
+// were (or in dry-run, would be) copied.
 //
 // ctx cancels the copy: the pure-Go backend checks it between chunks (so a
 // large file aborts promptly), and the cp/rsync backends run as child
@@ -100,12 +100,14 @@ func CopyFile(ctx context.Context, src, dst string, mtime time.Time, dryRun bool
 		return 0, fmt.Errorf("unknown copy tool %q", tool)
 	}
 
-	// Preserve mode and mtime on the temp file before the atomic rename. These
-	// target only the temp file inside --out, never the source.
+	// Preserve mode and timestamps on the temp file before the atomic rename.
+	// These target only the temp file inside --out, never the source. The
+	// creation time is carried over from srcInfo on Windows (see
+	// preserveTimestamps); other platforms have no settable birth time.
 	if err := os.Chmod(tmpName, srcInfo.Mode().Perm()); err != nil {
 		return 0, err
 	}
-	if err := os.Chtimes(tmpName, mtime, mtime); err != nil {
+	if err := preserveTimestamps(tmpName, srcInfo, mtime); err != nil {
 		return 0, err
 	}
 	if err := os.Rename(tmpName, dst); err != nil {
