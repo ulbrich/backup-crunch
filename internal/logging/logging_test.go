@@ -3,6 +3,7 @@ package logging
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -33,6 +34,45 @@ func TestNewVerboseIncludesDebug(t *testing.T) {
 	l.Debug("per-entry detail", "path", "a.txt")
 	if !strings.Contains(buf.String(), "per-entry detail") {
 		t.Errorf("debug output should appear in verbose mode:\n%s", buf.String())
+	}
+}
+
+// Concurrent logging through a shared logger (and a WithAttrs-derived child
+// that shares the same lock) must be race-free and must not interleave or drop
+// lines. Run under -race to exercise the slog.Handler concurrency contract.
+func TestConcurrentLoggingIsRaceFree(t *testing.T) {
+	var buf bytes.Buffer
+	base := New(&buf, true) // verbose so Info passes the level filter
+	child := base.With("worker", "child")
+
+	const goroutines = 16
+	const perGoroutine = 64
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		l := base
+		if g%2 == 0 {
+			l = child // half use the derived handler, sharing the same mutex
+		}
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				l.Info("copy", "n", i)
+			}
+		}()
+	}
+	wg.Wait()
+
+	lines := strings.Count(buf.String(), "\n")
+	if want := goroutines * perGoroutine; lines != want {
+		t.Errorf("logged lines = %d, want %d (lines lost or interleaved)", lines, want)
+	}
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if !strings.HasPrefix(line, "backup-crunch: copy") {
+			t.Errorf("corrupted line (write interleaving?): %q", line)
+			break
+		}
 	}
 }
 

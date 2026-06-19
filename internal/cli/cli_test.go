@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 )
 
@@ -103,6 +104,34 @@ func TestParseExcludeRepeatable(t *testing.T) {
 	}
 	if len(c.Excludes) != 2 || c.Excludes[0] != "*.tmp" || c.Excludes[1] != "$RECYCLE.BIN" {
 		t.Errorf("Excludes = %v, want [*.tmp $RECYCLE.BIN]", c.Excludes)
+	}
+}
+
+func TestParseRejectsWorkersBelowOne(t *testing.T) {
+	src := tempSource(t)
+	out := filepath.Join(t.TempDir(), "out")
+	if _, err := Parse([]string{"merge", "--out", out, "--workers", "0", src}); err == nil {
+		t.Error("expected error for --workers 0")
+	}
+}
+
+func TestParseRejectsWorkersAboveMax(t *testing.T) {
+	src := tempSource(t)
+	out := filepath.Join(t.TempDir(), "out")
+	if _, err := Parse([]string{"merge", "--out", out, "--workers", strconv.Itoa(MaxWorkers + 1), src}); err == nil {
+		t.Errorf("expected error for --workers > %d", MaxWorkers)
+	}
+}
+
+func TestParseAcceptsWorkersAtMax(t *testing.T) {
+	src := tempSource(t)
+	out := filepath.Join(t.TempDir(), "out")
+	c, err := Parse([]string{"merge", "--out", out, "--workers", strconv.Itoa(MaxWorkers), src})
+	if err != nil {
+		t.Fatalf("--workers %d should be accepted: %v", MaxWorkers, err)
+	}
+	if c.Workers != MaxWorkers {
+		t.Errorf("Workers = %d, want %d", c.Workers, MaxWorkers)
 	}
 }
 

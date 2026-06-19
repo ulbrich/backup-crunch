@@ -12,6 +12,12 @@ import (
 	"strings"
 )
 
+// MaxWorkers is the upper bound on --workers. The pool opens a file (and, with
+// --hash, hashes) per concurrent worker, so an unbounded value would exhaust
+// file descriptors on a large tree. 100 is well above the point of diminishing
+// returns for I/O-bound copying while staying clear of typical ulimit -n.
+const MaxWorkers = 100
+
 // Config is a fully validated merge invocation.
 type Config struct {
 	Out                string
@@ -48,7 +54,7 @@ Flags:
   --hash                       enable SHA-256 divergence detection on tied candidates
   --ts-cluster-threshold <n>   min identical-mtime files per source to flag a cluster (default 50)
   --copy-tool {go|cp|rsync}    copy backend (default go)
-  --workers <n>                parallel copy/hash workers (default 1)
+  --workers <n>                parallel copy/hash workers (default 1, max 100)
   --exclude <glob>             skip files/dirs matching this glob (repeatable;
                                matched against the relative path and base name)
   -v, --verbose                verbose logging (per-file skip/unreadable detail)
@@ -108,6 +114,9 @@ func (c *Config) validate() error {
 	}
 	if c.Workers < 1 {
 		return errors.New("--workers must be >= 1")
+	}
+	if c.Workers > MaxWorkers {
+		return fmt.Errorf("--workers must be <= %d", MaxWorkers)
 	}
 	if c.TSClusterThreshold < 1 {
 		return errors.New("--ts-cluster-threshold must be >= 1")

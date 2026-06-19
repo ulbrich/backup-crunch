@@ -5,6 +5,7 @@ package merge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -72,8 +73,15 @@ func WithVersion(v string) Option {
 }
 
 // Run executes the merge described by c and returns the assembled manifest.
-// The manifest is always written to disk (even in dry-run). ctx cancels the
-// scan and the copy phase.
+// ctx cancels the scan, hash, and copy phases.
+//
+// Error contract:
+//   - A failure before any output is written (scan or hash) returns the zero
+//     Manifest and the error; nothing was written to --out.
+//   - Once winners are selected, the manifest is always written to disk (even
+//     in dry-run and even if copying fails) and returned populated. A copy
+//     failure is reported both as the returned error and as Manifest.RunError,
+//     so the audit trail and any partial progress are never lost.
 func Run(ctx context.Context, c *cli.Config, opts ...Option) (model.Manifest, error) {
 	o := options{
 		logger:  logging.Discard(),
@@ -98,7 +106,9 @@ func Run(ctx context.Context, c *cli.Config, opts ...Option) (model.Manifest, er
 
 	// 4. Optional hashing of tied top candidates for divergence detection.
 	if c.Hash {
-		hashTiedGroups(groups, o.logger)
+		if err := hashTiedGroups(ctx, groups, c.Workers, o.logger); err != nil {
+			return model.Manifest{}, err
+		}
 	}
 
 	// 5. Select winners (pure), in deterministic fold-key order.
@@ -107,12 +117,12 @@ func Run(ctx context.Context, c *cli.Config, opts ...Option) (model.Manifest, er
 	// 6. Tally the summary and collect the copy jobs.
 	summary, jobs := summarize(c, stats, len(groups), records)
 
-	// 7. Copy winners (dry-run aware).
-	bytesCopied, err := copyWinners(ctx, jobs, c)
-	if err != nil {
-		return model.Manifest{}, err
-	}
-	// BytesCopied reflects bytes actually written; a dry-run copies none.
+	// 7. Copy winners (dry-run aware). A copy failure does not abort manifest
+	// assembly: files may already be on disk, so the audit trail must still be
+	// written. copyWinners returns the bytes copied so far even on error.
+	bytesCopied, copyErr := copyWinners(ctx, jobs, c)
+	// BytesCopied reflects bytes actually written (partial on failure); a
+	// dry-run copies none.
 	if !c.DryRun {
 		summary.BytesCopied = bytesCopied
 	}
@@ -129,15 +139,19 @@ func Run(ctx context.Context, c *cli.Config, opts ...Option) (model.Manifest, er
 		Clusters:       clusters,
 		UnreadableDirs: stats.UnreadableDirList,
 	}
+	if copyErr != nil {
+		m.RunError = copyErr.Error()
+	}
 
-	// Manifest is always written, even in dry-run.
+	// The manifest is always written — even in dry-run and even when copying
+	// failed — so the decisions and any partial progress are preserved.
 	if err := os.MkdirAll(filepath.Dir(c.ManifestPath), 0o755); err != nil {
-		return m, fmt.Errorf("create manifest dir: %w", err)
+		return m, errors.Join(copyErr, fmt.Errorf("create manifest dir: %w", err))
 	}
 	if err := manifest.Write(m, c.ManifestPath); err != nil {
-		return m, fmt.Errorf("write manifest: %w", err)
+		return m, errors.Join(copyErr, fmt.Errorf("write manifest: %w", err))
 	}
-	return m, nil
+	return m, copyErr
 }
 
 // scanAll walks every source (read-only) and returns the combined files plus
@@ -262,40 +276,74 @@ func copyOne(ctx context.Context, r *model.DecisionRecord, c *cli.Config) (int64
 
 // hashTiedGroups hashes only the candidates that tie the best (mtime,size)
 // within a group — the only ones whose divergence can affect the decision —
-// keeping hashing cost bounded. Hash errors are logged and skipped.
-func hashTiedGroups(groups map[string]*model.CandidateGroup, logger *slog.Logger) {
+// keeping hashing cost bounded. The files are hashed on a worker pool bounded
+// by the same --workers setting that governs copying, and ctx is honored so a
+// cancelled run aborts hashing promptly.
+//
+// Each tied candidate is a distinct *File (a pointer into a distinct group's
+// slice), so concurrent workers never write the same File — no extra locking is
+// needed. A per-file read error is logged and skipped (best-effort divergence
+// detection); only a context cancellation aborts the whole pass.
+func hashTiedGroups(ctx context.Context, groups map[string]*model.CandidateGroup, workers int, logger *slog.Logger) error {
+	var toHash []*model.File
 	for _, g := range groups {
-		var nonEmpty []*model.File
-		for i := range g.Candidates {
-			if !g.Candidates[i].IsEmpty {
-				nonEmpty = append(nonEmpty, &g.Candidates[i])
-			}
-		}
-		if len(nonEmpty) < 2 {
-			continue
-		}
-		best := nonEmpty[0]
-		for _, f := range nonEmpty[1:] {
-			if f.ModTime.After(best.ModTime) || (f.ModTime.Equal(best.ModTime) && f.Size > best.Size) {
-				best = f
-			}
-		}
-		var tied []*model.File
-		for _, f := range nonEmpty {
-			if f.ModTime.Equal(best.ModTime) && f.Size == best.Size {
-				tied = append(tied, f)
-			}
-		}
-		if len(tied) < 2 {
-			continue
-		}
-		for _, f := range tied {
-			h, err := hash.SHA256Stream(filepath.Join(f.SourceRoot, filepath.FromSlash(f.RelPath)))
+		toHash = append(toHash, tiedCandidates(g)...)
+	}
+	if len(toHash) == 0 {
+		return nil
+	}
+
+	g, ctx := errgroup.WithContext(ctx)
+	if workers > 1 {
+		g.SetLimit(workers)
+	} else {
+		g.SetLimit(1)
+	}
+	for _, f := range toHash {
+		g.Go(func() error {
+			h, err := hash.SHA256Stream(ctx, filepath.Join(f.SourceRoot, filepath.FromSlash(f.RelPath)))
 			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err // a cancelled run aborts the whole pass
+				}
 				logger.Warn("hash failed", "path", f.RelPath, "err", err)
-				continue
+				return nil
 			}
 			f.Hash = h
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
+// tiedCandidates returns the non-empty candidates of g that tie the best
+// (mtime, size) — the only candidates whose content could diverge and change
+// the decision. It returns nil if fewer than two candidates tie (nothing to
+// compare).
+func tiedCandidates(g *model.CandidateGroup) []*model.File {
+	var nonEmpty []*model.File
+	for i := range g.Candidates {
+		if !g.Candidates[i].IsEmpty {
+			nonEmpty = append(nonEmpty, &g.Candidates[i])
 		}
 	}
+	if len(nonEmpty) < 2 {
+		return nil
+	}
+	best := nonEmpty[0]
+	for _, f := range nonEmpty[1:] {
+		if f.ModTime.After(best.ModTime) || (f.ModTime.Equal(best.ModTime) && f.Size > best.Size) {
+			best = f
+		}
+	}
+	var tied []*model.File
+	for _, f := range nonEmpty {
+		if f.ModTime.Equal(best.ModTime) && f.Size == best.Size {
+			tied = append(tied, f)
+		}
+	}
+	if len(tied) < 2 {
+		return nil
+	}
+	return tied
 }

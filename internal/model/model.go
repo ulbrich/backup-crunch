@@ -98,7 +98,12 @@ type Manifest struct {
 	Tool        string           `json:"tool"`
 	Version     string           `json:"version"`
 	GeneratedAt time.Time        `json:"generated_at"`
-	OutDir      string           `json:"out_dir"`
+	// RunError, when non-empty, records that the run failed after winners were
+	// selected (e.g. a copy error). The manifest is still written so the audit
+	// trail of decisions and any partial progress (Summary.BytesCopied) is
+	// preserved rather than lost with the error.
+	RunError string `json:"run_error,omitempty"`
+	OutDir   string `json:"out_dir"`
 	Sources     []string         `json:"sources"`
 	Summary     Summary          `json:"summary"`
 	Records     []DecisionRecord `json:"records"`

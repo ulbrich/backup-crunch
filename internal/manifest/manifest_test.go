@@ -3,6 +3,7 @@ package manifest
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,11 @@ import (
 
 	"github.com/janulbrich/backup-crunch/internal/model"
 )
+
+// errWriter fails every write with a fixed error.
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func sampleManifest() model.Manifest {
 	w := model.File{SourceIndex: 1, SourceRoot: "/b", RelPath: "a.txt", Size: 10, ModTime: time.Unix(1, 0).UTC()}
@@ -56,5 +62,15 @@ func TestPrintSummary(t *testing.T) {
 	}
 	if buf.Len() == 0 {
 		t.Error("expected non-empty summary output")
+	}
+}
+
+// PrintSummary must surface a writer error to the caller (main relies on this
+// to detect — and deliberately tolerate — a broken pipe).
+func TestPrintSummaryReturnsWriteError(t *testing.T) {
+	sentinel := errors.New("write blew up")
+	err := PrintSummary(errWriter{err: sentinel}, sampleManifest())
+	if !errors.Is(err, sentinel) {
+		t.Errorf("PrintSummary error = %v, want %v", err, sentinel)
 	}
 }

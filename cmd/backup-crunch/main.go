@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/janulbrich/backup-crunch/internal/cli"
 	"github.com/janulbrich/backup-crunch/internal/logging"
@@ -29,7 +31,7 @@ func main() {
 
 	// Cancel the run cleanly on Ctrl-C / SIGTERM so deferred temp-file cleanup
 	// runs instead of leaving partial artifacts in --out.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Per-entry detail is gated behind --verbose (Debug level); genuine
@@ -41,7 +43,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	if err := manifest.PrintSummary(os.Stdout, m); err != nil {
+	// The summary is cosmetic and the real work (and manifest) is already done,
+	// so a broken pipe (e.g. piping into `head`) must not turn a successful
+	// recovery into a failure exit.
+	if err := manifest.PrintSummary(os.Stdout, m); err != nil && !errors.Is(err, syscall.EPIPE) {
 		fmt.Fprintln(os.Stderr, "error: writing summary:", err)
 		os.Exit(1)
 	}
